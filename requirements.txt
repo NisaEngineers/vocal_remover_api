@@ -1,0 +1,6 @@
+spleeter==2.4.0
+fastapi
+uvicorn
+python-multipart
+tensorflow==2.9.3
+numpy==1.26.4
