@@ -4,12 +4,13 @@ import shutil
 import logging
 import pathlib
 
+from spleeter.utils import get_default_cache_path
+from spleeter.separator import Separator
+
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-
-from spleeter.separator import Separator
 
 # Paths
 HOME_DIR = pathlib.Path(__file__).parent.resolve()
@@ -43,6 +44,21 @@ logger = logging.getLogger(__name__)
 # In-memory task status
 processing_status = {}
 
+
+def get_separator(model_id: str = "spleeter:2stems") -> Separator:
+    """
+    Instantiate a Separator, clearing the cache and retrying if the
+    existing model files are corrupt.
+    """
+    try:
+        return Separator(model_id)
+    except Exception as e:
+        bad_cache = get_default_cache_path()
+        logger.warning(f"Model init failed ({e}), clearing cache at {bad_cache}")
+        shutil.rmtree(bad_cache, ignore_errors=True)
+        return Separator(model_id)
+
+
 def process_audio_background(file_path: str, task_id: str):
     """Run Spleeter and organize outputs, then clean up the upload."""
     try:
@@ -50,8 +66,8 @@ def process_audio_background(file_path: str, task_id: str):
         safe_basename = basename.lower()
         out_dir = OUTPUT_BASE / safe_basename
 
-        # Separate stems
-        separator = Separator("spleeter:2stems")
+        # Separate stems using a safe loader
+        separator = get_separator("spleeter:2stems")
         separator.separate_to_file(file_path, str(OUTPUT_BASE))
 
         # After separation, Spleeter creates a folder named `basename`
@@ -112,8 +128,14 @@ async def process_audio(
         # Build URLs (they'll be valid once processing completes)
         status_url = request.url_for("get_status", task_id=task_id)
         downloads = {
-            "vocals": request.url_for("output_files", path=f"{audio_file.filename.rsplit('.',1)[0].lower()}/vocals.wav"),
-            "accompaniment": request.url_for("output_files", path=f"{audio_file.filename.rsplit('.',1)[0].lower()}/accompaniment.wav"),
+            "vocals": request.url_for(
+                "output_files",
+                path=f"{audio_file.filename.rsplit('.',1)[0].lower()}/vocals.wav",
+            ),
+            "accompaniment": request.url_for(
+                "output_files",
+                path=f"{audio_file.filename.rsplit('.',1)[0].lower()}/accompaniment.wav",
+            ),
             "all": request.url_for("download_all", task_id=task_id),
         }
 
@@ -156,7 +178,6 @@ def download_all(task_id: str):
 
     # Prepare zip archive
     zip_path = OUTPUT_BASE / f"{safe_basename}_stems.zip"
-    # Remove old zip if exists
     if zip_path.exists():
         zip_path.unlink()
     shutil.make_archive(str(zip_path.with_suffix('')), 'zip', stem_dir)
@@ -165,7 +186,7 @@ def download_all(task_id: str):
     return FileResponse(
         path=str(zip_path),
         filename=f"{safe_basename}_stems.zip",
-        media_type="application/zip"
+        media_type="application/zip",
     )
 
 
@@ -174,7 +195,16 @@ def ping():
     return {"status": "alive"}
 
 
+@app.on_event("startup")
+async def predownload_model():
+    """
+    Force a model download on startup so the first user request
+    doesn’t have to wait for TensorFlow to pull weights.
+    """
+    get_separator("spleeter:2stems")
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8001)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
